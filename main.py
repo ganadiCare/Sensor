@@ -14,7 +14,7 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, R
 from aiortc.mediastreams import VideoStreamTrack
 from av import VideoFrame
 from ultralytics import YOLO
-from gpiozero import Servo
+from gpiozero import Servo, Device
 from gpiozero.pins.lgpio import LGPIOFactory
 from dotenv import load_dotenv
 
@@ -43,23 +43,23 @@ output_frame = None
 frame_lock   = threading.Lock()
 
 # ==========================================
-# 2. 서보모터 초기화
+# 2. 서보모터 초기화 (lgpio 전역 설정 적용)
 # ==========================================
-factory    = LGPIOFactory()
-servo_tilt = Servo(12, pin_factory=factory, min_pulse_width=0.6/1000, max_pulse_width=2.4/1000)
-servo_pan  = Servo(13, pin_factory=factory, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000)
+# 🔥 시스템 전체의 기본 핀 팩토리를 강제로 lgpio로 고정! (경고 완벽 차단)
+Device.pin_factory = LGPIOFactory()
+
+# 이제 pin_factory 옵션을 안 적어도 알아서 적용됩니다.
+servo_tilt = Servo(12, min_pulse_width=0.6/1000, max_pulse_width=2.4/1000)
+servo_pan  = Servo(13, min_pulse_width=0.5/1000, max_pulse_width=2.5/1000)
 
 current_pan  = 105.0
 current_tilt = 75.0
-next_pan     = current_pan
-next_tilt    = current_tilt
-servo_event  = threading.Event()
-servo_busy   = False
 manual_mode  = False
 
 def set_servo_angle(servo, angle):
     servo.value = (angle - 90) / 90.0
 
+# 초기 구동 후 지터링 방지를 위해 즉시 detach
 set_servo_angle(servo_pan,  current_pan)
 set_servo_angle(servo_tilt, current_tilt)
 time.sleep(0.5)
@@ -67,43 +67,7 @@ servo_pan.detach()
 servo_tilt.detach()
 
 # ==========================================
-# 3. 서보 워커 스레드
-# ==========================================
-STEP_DEG   = 2.0
-STEP_SLEEP = 0.04
-SETTLE     = 0.1
-
-def run_servo_worker():
-    global current_pan, current_tilt, servo_busy
-    while not exit_flag:
-        if not servo_event.wait(timeout=0.5):
-            continue
-        servo_event.clear()
-        servo_busy = True
-
-        tp, tt = next_pan, next_tilt
-        while True:
-            dp, dt = tp - current_pan, tt - current_tilt
-            if abs(dp) < 0.3 and abs(dt) < 0.3:
-                break
-            if abs(dp) >= 0.3:
-                current_pan  += max(-STEP_DEG, min(STEP_DEG, dp))
-            if abs(dt) >= 0.3:
-                current_tilt += max(-STEP_DEG, min(STEP_DEG, dt))
-            set_servo_angle(servo_pan,  current_pan)
-            set_servo_angle(servo_tilt, current_tilt)
-            time.sleep(STEP_SLEEP)
-
-        current_pan, current_tilt = tp, tt
-        set_servo_angle(servo_pan,  current_pan)
-        set_servo_angle(servo_tilt, current_tilt)
-        time.sleep(SETTLE)
-        servo_pan.detach()
-        servo_tilt.detach()
-        servo_busy = False
-
-# ==========================================
-# 4. 카메라 프레임 읽기 스레드
+# 3. 카메라 프레임 읽기 스레드
 # ==========================================
 def read_frames(process):
     global latest_frame, exit_flag
@@ -130,16 +94,16 @@ def read_frames(process):
             buffer = b''
 
 # ==========================================
-# 5. YOLO 추론 + AI 트래킹 스레드
+# 4. YOLO 추론 + AI 트래킹 스레드 (다이렉트 제어 및 간섭 차단)
 # ==========================================
 def run_inference_and_track():
-    global exit_flag, output_frame, next_pan, next_tilt
+    global exit_flag, output_frame, current_pan, current_tilt
 
     CENTER_X, CENTER_Y = 320, 240
     DEADZONE_X, DEADZONE_Y = 120, 90
     MAX_STEP_PAN, MAX_STEP_TILT = 4.0, 3.0
     PAN_GAIN, TILT_GAIN = 0.03, 0.025
-    MOVE_COOLDOWN = 1.5
+    MOVE_COOLDOWN = 1.0
 
     smooth_cx, smooth_cy = float(CENTER_X), float(CENTER_Y)
     EMA_ALPHA = 0.3
@@ -190,21 +154,36 @@ def run_inference_and_track():
             smooth_cx = EMA_ALPHA*cx + (1-EMA_ALPHA)*smooth_cx
             smooth_cy = EMA_ALPHA*cy + (1-EMA_ALPHA)*smooth_cy
             now = time.time()
-            if now - last_move_time >= MOVE_COOLDOWN and not servo_busy:
+            
+            if now - last_move_time >= MOVE_COOLDOWN:
                 ex, ey = CENTER_X - smooth_cx, CENTER_Y - smooth_cy
-                np_, nt_, moved = current_pan, current_tilt, False
+                pan_moved = False
+                tilt_moved = False
+                
+                # 좌우로 움직여야 할 때만 값 갱신
                 if abs(ex) > DEADZONE_X:
-                    np_ = max(55.0, min(155.0, current_pan + max(-MAX_STEP_PAN, min(MAX_STEP_PAN, ex*PAN_GAIN))))
-                    moved = True
+                    current_pan = max(55.0, min(155.0, current_pan + max(-MAX_STEP_PAN, min(MAX_STEP_PAN, ex*PAN_GAIN))))
+                    pan_moved = True
+                
+                # 상하로 움직여야 할 때만 값 갱신
                 if abs(ey) > DEADZONE_Y:
-                    nt_ = max(0.0, min(120.0, current_tilt + max(-MAX_STEP_TILT, min(MAX_STEP_TILT, -ey*TILT_GAIN))))
-                    moved = True
-                if moved:
-                    next_pan, next_tilt = np_, nt_
-                    servo_event.set()
+                    current_tilt = max(0.0, min(120.0, current_tilt + max(-MAX_STEP_TILT, min(MAX_STEP_TILT, -ey*TILT_GAIN))))
+                    tilt_moved = True
+                
+                # 🔥 핵심 수정: 값이 변한(움직이는) 모터에만 전기를 쏴서 간섭/발작 차단
+                if pan_moved:
+                    set_servo_angle(servo_pan, current_pan)
+                if tilt_moved:
+                    set_servo_angle(servo_tilt, current_tilt)
+                    
+                if pan_moved or tilt_moved:
                     last_move_time = now
         else:
             smooth_cx, smooth_cy = float(CENTER_X), float(CENTER_Y)
+            # 타겟이 화면에서 사라지고 2초가 지나면 모든 모터 전기 차단 (떨림 방지)
+            if time.time() - last_move_time > 2.0:
+                servo_pan.detach()
+                servo_tilt.detach()
 
         cv2.putText(frame, "AUTO", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0,255,0), 2)
 
@@ -212,25 +191,46 @@ def run_inference_and_track():
             output_frame = frame
 
 # ==========================================
-# 6. 수동 조작 처리
+# 5. 수동 조작 처리 (다이렉트 이동 + Detach)
 # ==========================================
-MANUAL_STEP = 5.0
-
 def handle_control(msg):
-    global manual_mode, next_pan, next_tilt
+    global manual_mode, current_pan, current_tilt
     cmd = msg.get("cmd")
+    
     if cmd == "mode":
         manual_mode = (msg.get("val") == "manual")
         print(f"모드 변경: {'MANUAL' if manual_mode else 'AUTO'}")
+        if not manual_mode:
+            servo_pan.detach()
+            servo_tilt.detach()
+            
     elif cmd == "move" and manual_mode:
-        new_pan  = max(55.0,  min(155.0, current_pan  + msg.get("pan",  0) * MANUAL_STEP))
-        new_tilt = max(0.0,   min(120.0, current_tilt - msg.get("tilt", 0) * MANUAL_STEP))
-        if new_pan != current_pan or new_tilt != current_tilt:
-            next_pan, next_tilt = new_pan, new_tilt
-            servo_event.set()
+        MANUAL_STEP = 3.0  # 움직이는 각도
+        
+        pan_dir = msg.get("pan", 0)
+        tilt_dir = msg.get("tilt", 0)
+        
+        if pan_dir == 0 and tilt_dir == 0:
+            current_pan, current_tilt = 105.0, 75.0
+            set_servo_angle(servo_pan, current_pan)
+            set_servo_angle(servo_tilt, current_tilt)
+            return
+
+        # 🔥 수정된 부분: 방향값이 있는 모터(움직여야 하는 모터)만 신호를 보냄!
+        if pan_dir != 0:
+            current_pan  = max(55.0,  min(155.0, current_pan  + pan_dir * MANUAL_STEP))
+            set_servo_angle(servo_pan, current_pan)
+            
+        if tilt_dir != 0:
+            current_tilt = max(0.0,   min(120.0, current_tilt - tilt_dir * MANUAL_STEP))
+            set_servo_angle(servo_tilt, current_tilt)
+        
+    elif cmd == "stop" and manual_mode:
+        servo_pan.detach()
+        servo_tilt.detach()
 
 # ==========================================
-# 7. WebRTC 비디오 트랙
+# 6. WebRTC 비디오 트랙
 # ==========================================
 class CameraTrack(VideoStreamTrack):
     kind = "video"
@@ -245,7 +245,7 @@ class CameraTrack(VideoStreamTrack):
         return vf
 
 # ==========================================
-# 8. WebRTC 연결 처리
+# 7. WebRTC 연결 처리
 # ==========================================
 ICE_CONFIG = RTCConfiguration(iceServers=[
     RTCIceServer(
@@ -282,8 +282,7 @@ async def handle_offer(session_id: str, sdp: str, ws):
             await pc.close()
             pcs.pop(session_id, None)
 
-
-    @pc.on("iceconnectionstatechange")  # 👈 통째로 추가
+    @pc.on("iceconnectionstatechange")
     async def on_ice_state():
         print(f"ICE 상태: {pc.iceConnectionState}")
 
@@ -307,7 +306,7 @@ async def handle_offer(session_id: str, sdp: str, ws):
     print(f"Answer 전송 완료 (session: {session_id[:8]}...)")
 
 # ==========================================
-# 9. 시그널링 루프
+# 8. 시그널링 루프
 # ==========================================
 async def signaling_loop():
     while not exit_flag:
@@ -338,7 +337,7 @@ async def signaling_loop():
             await asyncio.sleep(5)
 
 # ==========================================
-# 10. 메인
+# 9. 메인
 # ==========================================
 if __name__ == "__main__":
     cmd = ('rpicam-vid --camera 1 --inline --nopreview -t 0 '
@@ -348,10 +347,9 @@ if __name__ == "__main__":
 
     threading.Thread(target=read_frames,             args=(process,), daemon=True).start()
     threading.Thread(target=run_inference_and_track,                  daemon=True).start()
-    threading.Thread(target=run_servo_worker,                         daemon=True).start()
 
     print("="*50)
-    print("WebRTC 트래커 시작 (Spring Boot 시그널링)")
+    print("WebRTC 트래커 시작 (모터 튜닝 완벽 버전)")
     print("="*50)
 
     try:
