@@ -1,0 +1,12 @@
+[Unit]
+Description=Configure GPIO12/13 hardware PWM for Sensor
+After=systemd-udev-trigger.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/sensor-hardware-pwm-setup
+RemainAfterExit=yes
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

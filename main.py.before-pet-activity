@@ -124,7 +124,7 @@ def update_dog_activity(dog_detected):
                 dog_last_update_mono = now_mono
                 enqueue_activity()
                 print(
-                    f"[활동] 반려동물 감지 시작: {dog_detection_id} "
+                    f"[활동] 강아지 감지 시작: {dog_detection_id} "
                     f"({utc_text(dog_detected_started_at)})"
                 )
                 return
@@ -151,7 +151,7 @@ def update_dog_activity(dog_detected):
         ended_at = dog_last_detected_at
         seconds = int((ended_at - dog_detected_started_at).total_seconds())
         enqueue_activity(ended_at=ended_at)
-        print(f"[활동] 반려동물 감지 종료: {dog_detection_id}, {seconds}초")
+        print(f"[활동] 강아지 감지 종료: {dog_detection_id}, {seconds}초")
 
         dog_detection_active = False
         dog_detection_id = None
@@ -516,11 +516,8 @@ def run_inference_and_track():
             latest_detections = detections
             latest_detection_time = time.monotonic()
 
-        pet_detected = any(
-            detection[0] in ("dog", "cat")
-            for detection in detections
-        )
-        update_dog_activity(pet_detected)
+        dog_detected = any(detection[0] == "dog" for detection in detections)
+        update_dog_activity(dog_detected)
 
         if centers and not is_manual_now:
             # 이미 보고 있던 위치에 가장 가까운 대상을 우선해, 두 동물 사이를
