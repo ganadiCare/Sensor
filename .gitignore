@@ -1,1 +1,14 @@
 .env
+secrets.h
+wemos/include/secrets.h
+
+# PlatformIO
+.pio/
+.vscode/
+
+# Generated files and local experiment backups
+__pycache__/
+*.py[cod]
+*.bak
+*.before-*
+/test-cam*.mjpeg

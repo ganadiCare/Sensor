@@ -1,5 +1,9 @@
 # Sensor
 
+- 루트: 라즈베리파이 카메라·추적 및 하드웨어 PWM 코드
+- [wemos](wemos/README.md): ESP8266 급식·급수 펌웨어
+- [tests/manual](tests/manual/README.md): 라즈베리파이 수동 하드웨어 테스트
+
 ## 하드웨어 PWM 부팅 자동 설정
 
 GPIO12/13 서보 PWM의 export와 쓰기 권한은 재부팅하면 초기화됩니다.
